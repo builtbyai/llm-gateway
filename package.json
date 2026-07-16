@@ -1,0 +1,45 @@
+{
+  "name": "llm-gateway",
+  "version": "0.1.0",
+  "description": "Per-model, cache-aware LLM cost attribution with an append-only usage ledger.",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "llm-gateway": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "jest",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "llm",
+    "cost",
+    "pricing",
+    "token-usage",
+    "prompt-caching",
+    "anthropic",
+    "claude",
+    "ollama",
+    "usage-ledger",
+    "cost-attribution"
+  ],
+  "author": "builtbyai <jalen1wa@gmail.com>",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.0",
+    "@types/node": "^20.0.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.0",
+    "typescript": "^5.4.0"
+  }
+}

@@ -6,6 +6,7 @@
 import {
   PROVIDERS,
   ANTHROPIC_MODELS,
+  PRICING_VERSION,
   resolveModel,
   resolveAnthropicModelId,
   getModelDescriptor,
@@ -20,17 +21,26 @@ import {
 
 describe('providers', () => {
   describe('Anthropic model registry', () => {
-    it('pins Opus 4.7 with April-2026 pricing', () => {
-      const opus = ANTHROPIC_MODELS['claude-opus-4-7'];
-      expect(opus.contextWindow).toBe(1_000_000);
-      expect(opus.inputCostPerMTok).toBe(5);
-      expect(opus.outputCostPerMTok).toBe(25);
-      expect(opus.cacheReadMultiplier).toBe(0.1);
-      expect(opus.supportsVision).toBe(true);
+    it('exposes a dated PRICING_VERSION stamp', () => {
+      expect(PRICING_VERSION).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    });
+
+    it('pins the current Opus flagship (4.8) and keeps 4.7 for historical records', () => {
+      const opus8 = ANTHROPIC_MODELS['claude-opus-4-8'];
+      expect(opus8.contextWindow).toBe(1_000_000);
+      expect(opus8.inputCostPerMTok).toBe(5);
+      expect(opus8.outputCostPerMTok).toBe(25);
+      expect(opus8.cacheReadMultiplier).toBe(0.1);
+      expect(opus8.supportsVision).toBe(true);
+
+      // 4.7 stays in the registry so old ledger lines still price.
+      const opus7 = ANTHROPIC_MODELS['claude-opus-4-7'];
+      expect(opus7.inputCostPerMTok).toBe(5);
+      expect(opus7.outputCostPerMTok).toBe(25);
     });
 
     it('resolves tier aliases to canonical IDs', () => {
-      expect(resolveAnthropicModelId('advanced')).toBe('claude-opus-4-7');
+      expect(resolveAnthropicModelId('advanced')).toBe('claude-opus-4-8');
       expect(resolveAnthropicModelId('standard')).toBe('claude-sonnet-4-6');
       expect(resolveAnthropicModelId('fast')).toBe('claude-haiku-4-5-20251001');
     });
@@ -39,15 +49,20 @@ describe('providers', () => {
       expect(resolveAnthropicModelId('claude-future-9-9')).toBe('claude-future-9-9');
     });
 
-    it('getModelDescriptor returns undefined for non-anthropic providers', () => {
-      expect(getModelDescriptor('openai', 'gpt-4.1')).toBeUndefined();
-      expect(getModelDescriptor('anthropic', 'advanced')?.id).toBe('claude-opus-4-7');
+    it('getModelDescriptor now resolves every provider', () => {
+      expect(getModelDescriptor('anthropic', 'advanced')?.id).toBe('claude-opus-4-8');
+      expect(getModelDescriptor('openai', 'gpt-4o')?.provider).toBe('openai');
+      expect(getModelDescriptor('openai', 'standard')?.id).toBe('gpt-4o');
+      // Ollama synthesizes a zero-cost descriptor for any local model.
+      const local = getModelDescriptor('ollama', 'some-local-model:latest');
+      expect(local?.provider).toBe('ollama');
+      expect(local?.inputCostPerMTok).toBe(0);
     });
   });
 
   describe('resolveModel (legacy tier map)', () => {
     it('maps anthropic tiers to pinned IDs', () => {
-      expect(resolveModel(PROVIDERS.anthropic, 'advanced')).toBe('claude-opus-4-7');
+      expect(resolveModel(PROVIDERS.anthropic, 'advanced')).toBe('claude-opus-4-8');
       expect(resolveModel(PROVIDERS.anthropic, 'fast')).toBe('claude-haiku-4-5-20251001');
     });
 

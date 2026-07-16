@@ -1,9 +1,10 @@
 /**
  * Provider Abstraction Layer
  *
- * Supports multiple AI backends: Anthropic (Claude), OpenAI (Codex), and Ollama (local).
- * Each provider maps the generic model tiers (fast/standard/advanced) to provider-specific models
- * and knows how to invoke its CLI or API.
+ * Supports multiple LLM backends: Anthropic (Claude), OpenAI (GPT / o-series),
+ * and Ollama (local, zero-cost). Each provider maps the generic model tiers
+ * (fast/standard/advanced) to provider-specific models, carries per-model
+ * pricing for cost attribution, and knows how to invoke its CLI or API.
  */
 
 export type ProviderName = 'anthropic' | 'openai' | 'ollama';
@@ -15,11 +16,34 @@ export interface ProviderModelMap {
 }
 
 /**
- * Rich model metadata used for cost accounting, cache planning, and capability checks.
- * Costs are USD per million tokens (MTok). Cache multipliers are applied to inputCostPerMTok.
+ * Pricing-table version stamp.
+ *
+ * This is the effective date of every USD rate in the model registries below.
+ * It is stamped onto each priced `UsageRecord` (see `priceUsage`) so a
+ * historical cost can be reconstructed and audited against the rates that were
+ * live when the call was made — even after this table is later refreshed.
+ *
+ * Effective date: 2026-07-16.
+ * Sources: platform.claude.com pricing, platform.openai.com/pricing.
+ * Bump this string in the SAME commit as any rate change.
+ */
+export const PRICING_VERSION = '2026-07-16';
+
+/**
+ * Rich model metadata used for cost accounting, cache planning, and capability
+ * checks. Costs are USD per million tokens (MTok). Cache multipliers are
+ * applied to `inputCostPerMTok`:
+ *   - cacheReadMultiplier      : rate for tokens served FROM cache
+ *   - cacheWriteMultiplier5min : rate premium for WRITING a 5-minute cache block
+ *   - cacheWriteMultiplier1h   : rate premium for WRITING a 1-hour cache block
+ *
+ * Anthropic charges a write premium (1.25x / 2x) and a deep read discount
+ * (0.1x). OpenAI's caching is automatic: reads are discounted (0.25x–0.5x) and
+ * there is no write premium (multiplier 1). Ollama is local, so every rate is 0.
  */
 export interface ModelDescriptor {
   id: string;
+  provider: ProviderName;
   contextWindow: number;
   maxOutputTokens: number;
   inputCostPerMTok: number;
@@ -33,12 +57,28 @@ export interface ModelDescriptor {
 }
 
 /**
- * Canonical Anthropic model registry (April 2026).
- * Source: platform.claude.com release notes.
+ * Canonical Anthropic model registry.
+ * Rates are USD/MTok, effective PRICING_VERSION (2026-07-16).
+ * Source: platform.claude.com pricing.
  */
 export const ANTHROPIC_MODELS: Record<string, ModelDescriptor> = {
+  'claude-opus-4-8': {
+    id: 'claude-opus-4-8',
+    provider: 'anthropic',
+    contextWindow: 1_000_000,
+    maxOutputTokens: 128_000,
+    inputCostPerMTok: 5,
+    outputCostPerMTok: 25,
+    cacheWriteMultiplier5min: 1.25,
+    cacheWriteMultiplier1h: 2,
+    cacheReadMultiplier: 0.1,
+    supportsCaching: true,
+    supportsVision: true,
+    releasedAt: '2026-07-01',
+  },
   'claude-opus-4-7': {
     id: 'claude-opus-4-7',
+    provider: 'anthropic',
     contextWindow: 1_000_000,
     maxOutputTokens: 128_000,
     inputCostPerMTok: 5,
@@ -52,6 +92,7 @@ export const ANTHROPIC_MODELS: Record<string, ModelDescriptor> = {
   },
   'claude-sonnet-4-6': {
     id: 'claude-sonnet-4-6',
+    provider: 'anthropic',
     contextWindow: 1_000_000,
     maxOutputTokens: 64_000,
     inputCostPerMTok: 3,
@@ -65,6 +106,7 @@ export const ANTHROPIC_MODELS: Record<string, ModelDescriptor> = {
   },
   'claude-haiku-4-5-20251001': {
     id: 'claude-haiku-4-5-20251001',
+    provider: 'anthropic',
     contextWindow: 200_000,
     maxOutputTokens: 8_192,
     inputCostPerMTok: 0.8,
@@ -78,26 +120,219 @@ export const ANTHROPIC_MODELS: Record<string, ModelDescriptor> = {
   },
 };
 
+/**
+ * Canonical OpenAI model registry.
+ * Rates are USD/MTok, effective PRICING_VERSION (2026-07-16).
+ * Source: platform.openai.com/pricing.
+ *
+ * OpenAI prompt caching is automatic: input tokens that hit the cache are
+ * billed at `cacheReadMultiplier` x the base input rate (0.5x for the 4o /
+ * o-series, 0.25x for the 4.1 family). There is no cache-WRITE premium, so the
+ * write multipliers are 1.
+ */
+export const OPENAI_MODELS: Record<string, ModelDescriptor> = {
+  'gpt-4o': {
+    id: 'gpt-4o',
+    provider: 'openai',
+    contextWindow: 128_000,
+    maxOutputTokens: 16_384,
+    inputCostPerMTok: 2.5,
+    outputCostPerMTok: 10,
+    // cached input $1.25 / MTok => 0.5x of $2.50
+    cacheReadMultiplier: 0.5,
+    cacheWriteMultiplier5min: 1,
+    cacheWriteMultiplier1h: 1,
+    supportsCaching: true,
+    supportsVision: true,
+    releasedAt: '2024-08-06',
+  },
+  'gpt-4o-mini': {
+    id: 'gpt-4o-mini',
+    provider: 'openai',
+    contextWindow: 128_000,
+    maxOutputTokens: 16_384,
+    inputCostPerMTok: 0.15,
+    outputCostPerMTok: 0.6,
+    // cached input $0.075 / MTok => 0.5x of $0.15
+    cacheReadMultiplier: 0.5,
+    cacheWriteMultiplier5min: 1,
+    cacheWriteMultiplier1h: 1,
+    supportsCaching: true,
+    supportsVision: true,
+    releasedAt: '2024-07-18',
+  },
+  'gpt-4.1': {
+    id: 'gpt-4.1',
+    provider: 'openai',
+    contextWindow: 1_000_000,
+    maxOutputTokens: 32_768,
+    inputCostPerMTok: 2,
+    outputCostPerMTok: 8,
+    // cached input $0.50 / MTok => 0.25x of $2.00
+    cacheReadMultiplier: 0.25,
+    cacheWriteMultiplier5min: 1,
+    cacheWriteMultiplier1h: 1,
+    supportsCaching: true,
+    supportsVision: true,
+    releasedAt: '2025-04-14',
+  },
+  'gpt-4.1-mini': {
+    id: 'gpt-4.1-mini',
+    provider: 'openai',
+    contextWindow: 1_000_000,
+    maxOutputTokens: 32_768,
+    inputCostPerMTok: 0.4,
+    outputCostPerMTok: 1.6,
+    // cached input $0.10 / MTok => 0.25x of $0.40
+    cacheReadMultiplier: 0.25,
+    cacheWriteMultiplier5min: 1,
+    cacheWriteMultiplier1h: 1,
+    supportsCaching: true,
+    supportsVision: true,
+    releasedAt: '2025-04-14',
+  },
+  o1: {
+    id: 'o1',
+    provider: 'openai',
+    contextWindow: 200_000,
+    maxOutputTokens: 100_000,
+    inputCostPerMTok: 15,
+    outputCostPerMTok: 60,
+    // cached input $7.50 / MTok => 0.5x of $15
+    cacheReadMultiplier: 0.5,
+    cacheWriteMultiplier5min: 1,
+    cacheWriteMultiplier1h: 1,
+    supportsCaching: true,
+    supportsVision: true,
+    releasedAt: '2024-12-17',
+  },
+  'o3-mini': {
+    id: 'o3-mini',
+    provider: 'openai',
+    contextWindow: 200_000,
+    maxOutputTokens: 100_000,
+    inputCostPerMTok: 1.1,
+    outputCostPerMTok: 4.4,
+    // cached input $0.55 / MTok => 0.5x of $1.10
+    cacheReadMultiplier: 0.5,
+    cacheWriteMultiplier5min: 1,
+    cacheWriteMultiplier1h: 1,
+    supportsCaching: true,
+    supportsVision: false,
+    releasedAt: '2025-01-31',
+  },
+};
+
+/**
+ * Known local Ollama models. Local inference is free, so every rate is 0 and
+ * `getModelDescriptor('ollama', <anything>)` synthesizes a zero-cost descriptor
+ * for models not listed here (you can run any model locally).
+ */
+export const OLLAMA_MODELS: Record<string, ModelDescriptor> = {
+  'qwen2.5-coder:7b': ollamaDescriptor('qwen2.5-coder:7b', 32_768),
+  'qwen2.5-coder:14b': ollamaDescriptor('qwen2.5-coder:14b', 32_768),
+  'qwq:32b': ollamaDescriptor('qwq:32b', 32_768),
+  'deepseek-r1:32b': ollamaDescriptor('deepseek-r1:32b', 65_536),
+  'llama3.1:8b': ollamaDescriptor('llama3.1:8b', 131_072),
+  'nomic-embed-text:latest': ollamaDescriptor('nomic-embed-text:latest', 8_192),
+};
+
+/** Build a zero-cost descriptor for a local Ollama model. */
+function ollamaDescriptor(id: string, contextWindow = 8_192): ModelDescriptor {
+  return {
+    id,
+    provider: 'ollama',
+    contextWindow,
+    maxOutputTokens: contextWindow,
+    inputCostPerMTok: 0,
+    outputCostPerMTok: 0,
+    cacheReadMultiplier: 0,
+    cacheWriteMultiplier5min: 0,
+    cacheWriteMultiplier1h: 0,
+    supportsCaching: false,
+    supportsVision: false,
+  };
+}
+
 /** Resolve a tier alias (fast/standard/advanced) to a canonical Anthropic model id. */
 export function resolveAnthropicModelId(tierOrId: string): string {
   const tierMap: Record<string, string> = {
     fast: 'claude-haiku-4-5-20251001',
     standard: 'claude-sonnet-4-6',
-    advanced: 'claude-opus-4-7',
+    advanced: 'claude-opus-4-8',
     haiku: 'claude-haiku-4-5-20251001',
     sonnet: 'claude-sonnet-4-6',
-    opus: 'claude-opus-4-7',
+    opus: 'claude-opus-4-8',
   };
   return tierMap[tierOrId] ?? tierOrId;
 }
 
-/** Look up a ModelDescriptor by id or tier alias. Returns undefined for unknown providers/models. */
+/** Resolve a tier alias to a canonical OpenAI model id. */
+export function resolveOpenAIModelId(tierOrId: string): string {
+  const tierMap: Record<string, string> = {
+    fast: 'gpt-4o-mini',
+    standard: 'gpt-4o',
+    advanced: 'o1',
+  };
+  return tierMap[tierOrId] ?? tierOrId;
+}
+
+/** Resolve a tier alias to a canonical Ollama model id. */
+export function resolveOllamaModelId(tierOrId: string): string {
+  const tierMap: Record<string, string> = {
+    fast: 'qwen2.5-coder:7b',
+    standard: 'qwen2.5-coder:14b',
+    advanced: 'qwq:32b',
+  };
+  return tierMap[tierOrId] ?? tierOrId;
+}
+
+/**
+ * Look up a ModelDescriptor for a specific provider by id or tier alias.
+ *
+ * - anthropic / openai: returns the pinned descriptor, or undefined if unknown.
+ * - ollama: always returns a (zero-cost) descriptor, synthesizing one for any
+ *   local model id not in `OLLAMA_MODELS`.
+ */
 export function getModelDescriptor(
   provider: ProviderName,
   tierOrId: string
 ): ModelDescriptor | undefined {
-  if (provider !== 'anthropic') return undefined;
-  return ANTHROPIC_MODELS[resolveAnthropicModelId(tierOrId)];
+  switch (provider) {
+    case 'anthropic':
+      return ANTHROPIC_MODELS[resolveAnthropicModelId(tierOrId)];
+    case 'openai':
+      return OPENAI_MODELS[resolveOpenAIModelId(tierOrId)];
+    case 'ollama': {
+      const id = resolveOllamaModelId(tierOrId);
+      return OLLAMA_MODELS[id] ?? ollamaDescriptor(id);
+    }
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Provider-agnostic descriptor lookup used by the cost model.
+ *
+ * If `provider` is given, defers to `getModelDescriptor`. Otherwise it resolves
+ * by id/tier across registries, trying Anthropic first (so bare tier aliases
+ * like `'advanced'` keep their historical Anthropic meaning), then OpenAI, then
+ * Ollama. Pass an explicit `provider` to disambiguate a shared tier alias.
+ */
+export function findModelDescriptor(
+  idOrTier: string,
+  provider?: ProviderName
+): ModelDescriptor | undefined {
+  if (provider) return getModelDescriptor(provider, idOrTier);
+
+  const anthropic = ANTHROPIC_MODELS[resolveAnthropicModelId(idOrTier)];
+  if (anthropic) return anthropic;
+
+  const openai = OPENAI_MODELS[resolveOpenAIModelId(idOrTier)];
+  if (openai) return openai;
+
+  return OLLAMA_MODELS[idOrTier];
 }
 
 export interface ProviderConfig {
@@ -124,7 +359,7 @@ export const PROVIDERS: Record<ProviderName, ProviderConfig> = {
     models: {
       fast: 'claude-haiku-4-5-20251001',
       standard: 'claude-sonnet-4-6',
-      advanced: 'claude-opus-4-7',
+      advanced: 'claude-opus-4-8',
     },
   },
   openai: {
@@ -132,9 +367,9 @@ export const PROVIDERS: Record<ProviderName, ProviderConfig> = {
     cli: 'codex',
     apiKeyEnv: 'OPENAI_API_KEY',
     models: {
-      fast: 'gpt-4.1-mini',
-      standard: 'gpt-4.1',
-      advanced: 'o3',
+      fast: 'gpt-4o-mini',
+      standard: 'gpt-4o',
+      advanced: 'o1',
     },
   },
   ollama: {
@@ -144,10 +379,9 @@ export const PROVIDERS: Record<ProviderName, ProviderConfig> = {
     models: {
       fast: 'qwen2.5-coder:7b',
       standard: 'qwen2.5-coder:14b',
-      // Advanced aliases to the standard tier by default. Pull a larger coder
-      // model (e.g. deepseek-coder-v2:16b) and update this mapping to enable a
-      // dedicated advanced tier.
-      advanced: 'qwen2.5-coder:14b',
+      // Advanced routes to a local reasoning model. Pull `qwq:32b` (or edit this
+      // mapping) to enable it; falls back gracefully to the coder tier if absent.
+      advanced: 'qwq:32b',
     },
   },
 };
@@ -164,7 +398,7 @@ export function resolveModel(
   if (tier in provider.models) {
     return provider.models[tier];
   }
-  // Pass through literal model names (e.g., 'gpt-4.1', 'llama3:70b')
+  // Pass through literal model names (e.g., 'gpt-4o', 'llama3:70b')
   return modelTier;
 }
 

@@ -11,7 +11,12 @@
  * See: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
  */
 
-import { getModelDescriptor, type ModelDescriptor } from '../config/providers.js';
+import {
+  findModelDescriptor,
+  PRICING_VERSION,
+  type ModelDescriptor,
+  type ProviderName,
+} from '../config/providers.js';
 
 export type CacheTTL = '5m' | '1h';
 
@@ -89,11 +94,46 @@ export function estimateCost(model: ModelDescriptor, usage: CacheUsage, ttl: Cac
   return baseInput + cacheWrite + cacheRead + output;
 }
 
+/** Options for the provider-agnostic cost entry points. */
+export interface ComputeCostOptions {
+  /**
+   * Disambiguate a model id / tier alias to a provider. Shared tier aliases
+   * (`'fast'`, `'advanced'`, …) exist for every provider; without this the
+   * lookup defaults to Anthropic for aliases, then matches OpenAI/Ollama by id.
+   */
+  provider?: ProviderName;
+  /** Cache TTL for the write-multiplier tier. Default '5m'. */
+  ttl?: CacheTTL;
+}
+
+function normalizeOptions(
+  ttlOrOptions: CacheTTL | ComputeCostOptions
+): { provider?: ProviderName; ttl: CacheTTL } {
+  if (typeof ttlOrOptions === 'string') return { ttl: ttlOrOptions };
+  return { provider: ttlOrOptions.provider, ttl: ttlOrOptions.ttl ?? '5m' };
+}
+
+function resolveDescriptor(
+  model: string | ModelDescriptor,
+  provider?: ProviderName
+): ModelDescriptor {
+  const descriptor =
+    typeof model === 'string' ? findModelDescriptor(model, provider) : model;
+  if (!descriptor) {
+    throw new Error(`Unknown model for cost lookup: ${String(model)}`);
+  }
+  return descriptor;
+}
+
 /**
- * Compute USD cost for a single call.
+ * Compute USD cost for a single call, for ANY provider.
  *
  * Ergonomic public entry point: accepts either a resolved `ModelDescriptor` or
- * a model id / tier alias (`'claude-opus-4-7'`, `'advanced'`, `'sonnet'`, …).
+ * a model id / tier alias (`'claude-opus-4-8'`, `'gpt-4o'`, `'advanced'`, …).
+ * The third argument is a `CacheTTL` (`'5m'` | `'1h'`) or an options object
+ * `{ provider?, ttl? }` — pass `{ provider: 'openai' }` to disambiguate a tier
+ * alias, or `{ provider: 'ollama' }` for a $0 local call.
+ *
  * The key property of this cost model is that cache-creation and cache-read
  * tokens are billed with *distinct* multipliers off the base input rate —
  * conflating them mis-prices a cache-heavy workload by 5–10×.
@@ -101,14 +141,62 @@ export function estimateCost(model: ModelDescriptor, usage: CacheUsage, ttl: Cac
 export function computeCost(
   usage: CacheUsage,
   model: string | ModelDescriptor,
-  ttl: CacheTTL = '5m'
+  ttlOrOptions: CacheTTL | ComputeCostOptions = '5m'
 ): number {
-  const descriptor =
-    typeof model === 'string' ? getModelDescriptor('anthropic', model) : model;
-  if (!descriptor) {
-    throw new Error(`Unknown model for cost lookup: ${String(model)}`);
-  }
+  const { provider, ttl } = normalizeOptions(ttlOrOptions);
+  const descriptor = resolveDescriptor(model, provider);
   return estimateCost(descriptor, usage, ttl);
+}
+
+/**
+ * The rate provenance stamped alongside a priced call, so any historical cost
+ * is independently reconstructable: `costUsd` equals `estimateCost` recomputed
+ * from these exact rates and the record's token counts.
+ */
+export interface PricedUsage {
+  costUsd: number;
+  pricingVersion: string;
+  /** Base input rate applied, USD/MTok. */
+  inputCostPerMTok: number;
+  /** Output rate applied, USD/MTok. */
+  outputCostPerMTok: number;
+  /** Cache-read multiplier actually applied. */
+  cacheReadMultiplier: number;
+  /** Cache-write multiplier actually applied for the chosen TTL. */
+  cacheWriteMultiplier: number;
+}
+
+/**
+ * Price a single call AND return the exact rates used, for auditable ledgers.
+ *
+ * `computeCost` returns just the number; `priceUsage` additionally reports the
+ * `inputCostPerMTok` / `outputCostPerMTok`, the cache multipliers that were
+ * applied for the chosen TTL, and the `PRICING_VERSION`. Stamping these onto
+ * the `UsageRecord` means a cost can be re-derived and verified years later,
+ * even after the price table is refreshed.
+ */
+export function priceUsage(
+  usage: CacheUsage,
+  model: string | ModelDescriptor,
+  ttlOrOptions: CacheTTL | ComputeCostOptions = '5m'
+): PricedUsage {
+  const { provider, ttl } = normalizeOptions(ttlOrOptions);
+  const descriptor = resolveDescriptor(model, provider);
+
+  const cacheWriteMultiplier =
+    ttl === '1h'
+      ? descriptor.cacheWriteMultiplier1h ?? 2
+      : descriptor.cacheWriteMultiplier5min ?? 1.25;
+  const cacheReadMultiplier = descriptor.cacheReadMultiplier ?? 0.1;
+
+  return {
+    costUsd: estimateCost(descriptor, usage, ttl),
+    pricingVersion: PRICING_VERSION,
+    inputCostPerMTok: descriptor.inputCostPerMTok,
+    outputCostPerMTok: descriptor.outputCostPerMTok,
+    cacheReadMultiplier,
+    cacheWriteMultiplier,
+  };
 }
 
 /** Cache hit ratio in [0, 1]. Returns 0 if no input tokens recorded. */

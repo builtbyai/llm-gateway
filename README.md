@@ -1,54 +1,46 @@
-# llm-gateway
+<div align="center">
 
-**Multi-provider (Anthropic + OpenAI + Ollama), cache-aware LLM cost
-attribution — with versioned pricing and per-record rate provenance — over an
-append-only usage ledger.**
+# 🧮 llm-gateway
+
+**Multi-provider (Anthropic + OpenAI + Ollama), cache-aware LLM cost attribution — with versioned pricing and per-record rate provenance — over an append-only usage ledger.**
 
 [![CI](https://github.com/builtbyai/llm-gateway/actions/workflows/ci.yml/badge.svg)](https://github.com/builtbyai/llm-gateway/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](./LICENSE)
+[![Node](https://img.shields.io/badge/Node-%E2%89%A518-339933?logo=node.js&logoColor=white)](#install)
+[![TypeScript](https://img.shields.io/badge/TypeScript-typed_API-3178C6?logo=typescript&logoColor=white)](#api)
+[![Runtime deps](https://img.shields.io/badge/runtime_deps-zero-3B9EF3)](#install)
 
-Most token trackers add up `input + output` tokens, multiply by a flat rate, and
-call it a day. That answer is wrong the moment **prompt caching** is involved —
-often by **5–10×** on a cache-heavy workload — because it conflates prices that
-are nowhere near each other. It's wrong a second way the moment you use **more
-than one provider**, because each vendor prices cache reads differently. And
-it's wrong a *third* way six months later, when the rate table has moved and you
-can no longer tell what a historical line actually cost.
+**[Providers](#providers)** · **[Install](#install)** · **[Cost Model](#cost)** · **[Ledger](#ledger)** · **[CLI](#cli)** · **[Fleet](#fleet)** · **[API](#api)**
+
+</div>
+
+---
+
+Most token trackers add up `input + output` tokens, multiply by a flat rate, and call it a day. That answer is wrong the moment **prompt caching** is involved — often by **5–10×** on a cache-heavy workload — because it conflates prices that are nowhere near each other. It's wrong a second way the moment you use **more than one provider**, because each vendor prices cache reads differently. And it's wrong a *third* way six months later, when the rate table has moved and you can no longer tell what a historical line actually cost.
 
 `llm-gateway` fixes all three:
 
-1. **Cache-aware.** `cacheCreationInputTokens` and `cacheReadInputTokens` are
-   kept as **distinct fields with distinct multipliers**, all the way from the
-   per-call cost function through the per-model / per-provider rollups.
-2. **Multi-provider.** Anthropic, OpenAI, and Ollama each carry their own pinned
-   rates and cache economics. One `computeCost` / one ledger, any provider.
-3. **Auditable.** Every rate is stamped with a dated `PRICING_VERSION`, and each
-   ledger record can carry the **exact rates used at compute time** so a cost is
-   reconstructable long after the price table is refreshed.
+1. **Cache-aware.** `cacheCreationInputTokens` and `cacheReadInputTokens` are kept as **distinct fields with distinct multipliers**, all the way from the per-call cost function through the per-model / per-provider rollups.
+2. **Multi-provider.** Anthropic, OpenAI, and Ollama each carry their own pinned rates and cache economics. One `computeCost` / one ledger, any provider.
+3. **Auditable.** Every rate is stamped with a dated `PRICING_VERSION`, and each ledger record can carry the **exact rates used at compute time** so a cost is reconstructable long after the price table is refreshed.
 
----
+<a name="providers"></a>
 
-## Provider cost models
+## 🏷️ Provider Cost Models
 
-Each provider prices caching on its own terms — the gateway models each one
-honestly rather than pretending they're the same:
+Each provider prices caching on its own terms — the gateway models each one honestly rather than pretending they're the same:
 
-| provider  | cache read              | cache write        | example rate (USD/MTok)                         |
-| --------- | ----------------------- | ------------------ | ----------------------------------------------- |
-| Anthropic | **0.1×** input          | **1.25×** (5m) / **2×** (1h) | `claude-opus-4-8` — $5 in / $25 out    |
-| OpenAI    | **0.5×** (4o/o-series), **0.25×** (4.1) | none (**1×**) | `gpt-4o` — $2.50 in / $10 out          |
-| Ollama    | n/a (local)             | n/a                | **$0** — every rate is zero                      |
+| Provider | Cache read | Cache write | Example rate (USD/MTok) |
+| :--- | :--- | :--- | :--- |
+| **Anthropic** | **0.1×** input | **1.25×** (5m) / **2×** (1h) | `claude-opus-4-8` — $5 in / $25 out |
+| **OpenAI** | **0.5×** (4o/o-series), **0.25×** (4.1) | none (**1×**) | `gpt-4o` — $2.50 in / $10 out |
+| **Ollama** | n/a (local) | n/a | **$0** — every rate is zero |
 
-Anthropic charges a premium to *write* a cache block and a deep discount to
-*read* it — a **12.5×** spread at the 5-minute tier. OpenAI's caching is
-automatic: cached input is simply discounted (0.5× for the 4o/o-series, 0.25×
-for the 4.1 family), with **no** write premium. Ollama runs locally, so its
-cost is exactly `$0` — which is the point of routing routine work there, and now
-that shows up truthfully in the rollup.
+Anthropic charges a premium to *write* a cache block and a deep discount to *read* it — a **12.5×** spread at the 5-minute tier. OpenAI's caching is automatic: cached input is simply discounted (0.5× for the 4o/o-series, 0.25× for the 4.1 family), with **no** write premium. Ollama runs locally, so its cost is exactly `$0` — which is the point of routing routine work there, and now that shows up truthfully in the rollup.
 
----
+<a name="install"></a>
 
-## Install
+## 📦 Install
 
 ```bash
 npm install llm-gateway
@@ -56,17 +48,13 @@ npm install llm-gateway
 
 Node 18+ (uses the built-in global `fetch`). Zero runtime dependencies.
 
----
+<a name="cost"></a>
 
-## The cost model
+## 💰 The Cost Model
 
 ### Per-call cost — any provider
 
-`computeCost(usage, model, ttlOrOptions?)` prices a single response. `model`
-accepts a canonical id (`'claude-opus-4-8'`, `'gpt-4o'`) or a tier alias
-(`'advanced'`, `'sonnet'`, `'fast'`, …). The third argument is a cache TTL
-(`'5m'` | `'1h'`) **or** an options object `{ provider?, ttl? }` — pass
-`provider` to disambiguate a tier alias shared across vendors.
+`computeCost(usage, model, ttlOrOptions?)` prices a single response. `model` accepts a canonical id (`'claude-opus-4-8'`, `'gpt-4o'`) or a tier alias (`'advanced'`, `'sonnet'`, `'fast'`, …). The third argument is a cache TTL (`'5m'` | `'1h'`) **or** an options object `{ provider?, ttl? }` — pass `provider` to disambiguate a tier alias shared across vendors.
 
 ```ts
 import { computeCost } from 'llm-gateway';
@@ -104,16 +92,11 @@ cacheRead   = cacheReadInputTokens     / 1e6 * inputCostPerMTok * readMultiplier
 output      = outputTokens             / 1e6 * outputCostPerMTok
 ```
 
-For Anthropic, `writeMultiplier` is `1.25` (5m) / `2` (1h) and `readMultiplier`
-is `0.1`. For OpenAI, there is no write premium (`1`) and reads are `0.5`/`0.25`.
-For Ollama every multiplier — and every base rate — is `0`.
+For Anthropic, `writeMultiplier` is `1.25` (5m) / `2` (1h) and `readMultiplier` is `0.1`. For OpenAI, there is no write premium (`1`) and reads are `0.5`/`0.25`. For Ollama every multiplier — and every base rate — is `0`.
 
 ### Versioned pricing registry
 
-Prices are pinned per model (USD/MTok) in `ANTHROPIC_MODELS`, `OPENAI_MODELS`,
-and `OLLAMA_MODELS`, so a rate change is a one-line edit, not a hunt through the
-codebase. The whole table is stamped with a dated **`PRICING_VERSION`** — bump it
-in the same commit as any rate change.
+Prices are pinned per model (USD/MTok) in `ANTHROPIC_MODELS`, `OPENAI_MODELS`, and `OLLAMA_MODELS`, so a rate change is a one-line edit, not a hunt through the codebase. The whole table is stamped with a dated **`PRICING_VERSION`** — bump it in the same commit as any rate change.
 
 ```ts
 import {
@@ -132,17 +115,11 @@ getModelDescriptor('ollama', 'any-local-model:7b')?.inputCostPerMTok; // 0
 findModelDescriptor('gpt-4o')?.provider;            // 'openai'
 ```
 
-Three providers ship out of the box, each with `fast` / `standard` / `advanced`
-tier aliases: `anthropic` (Claude), `openai` (GPT / o-series), and `ollama`
-(local, $0). `getModelDescriptor('ollama', …)` synthesizes a zero-cost
-descriptor for **any** local model id, so you can meter models you haven't
-pre-registered.
+Three providers ship out of the box, each with `fast` / `standard` / `advanced` tier aliases: `anthropic` (Claude), `openai` (GPT / o-series), and `ollama` (local, $0). `getModelDescriptor('ollama', …)` synthesizes a zero-cost descriptor for **any** local model id, so you can meter models you haven't pre-registered.
 
 ### Rate provenance — reconstructable costs
 
-`computeCost` returns just the number. `priceUsage` returns the number **plus
-the exact rates it applied**, so a historical cost can be re-derived and verified
-independently of the current price table:
+`computeCost` returns just the number. `priceUsage` returns the number **plus the exact rates it applied**, so a historical cost can be re-derived and verified independently of the current price table:
 
 ```ts
 import { priceUsage } from 'llm-gateway';
@@ -162,15 +139,25 @@ priceUsage(
 // }
 ```
 
-`buildUsageRecord()` (and `UsageLedger.record()`) fold this provenance directly
-into the ledger line — see below.
+`buildUsageRecord()` (and `UsageLedger.record()`) fold this provenance directly into the ledger line — see below.
 
----
+<a name="ledger"></a>
 
-## The usage ledger
+## 📒 The Usage Ledger
 
-Every priced call is one line of JSON, appended to a log you never rewrite. This
-is the schema of a `UsageRecord`:
+Every priced call is one line of JSON, appended to a log you never rewrite:
+
+```mermaid
+%%{init: {"theme": "base", "themeVariables": {"primaryColor": "#0D1622", "primaryTextColor": "#EEF3F7", "primaryBorderColor": "#3B9EF3", "lineColor": "#3078B4"}}}%%
+flowchart LR
+    U["provider response — raw token counts"] --> R["ledger.record()"]
+    R --> P["priceUsage() — cost + rates + PRICING_VERSION stamped"]
+    P --> J[("append-only JSONL ledger — ~/.structure/usage.log")]
+    J --> S["summarize() — byModel / byProvider rollups"]
+    J --> C["llm-gateway usage — CLI"]
+```
+
+This is the schema of a `UsageRecord`:
 
 ```ts
 interface UsageRecord {
@@ -194,8 +181,8 @@ interface UsageRecord {
 }
 ```
 
-The cheapest way to write a *correct, auditable* line is `ledger.record()` — it
-prices the call from raw token counts and stamps cost **and** provenance for you:
+> [!TIP]
+> The cheapest way to write a *correct, auditable* line is `ledger.record()` — it prices the call from raw token counts and stamps cost **and** provenance for you.
 
 ```ts
 import { UsageLedger } from 'llm-gateway';
@@ -232,8 +219,7 @@ await ledger.record({
 });
 ```
 
-Because every line carries its own rates, the cost is verifiable with nothing but
-the record itself:
+Because every line carries its own rates, the cost is verifiable with nothing but the record itself:
 
 ```
 costUsd ==  inputTokens              /1e6 * inputCostPerMTok
@@ -242,16 +228,11 @@ costUsd ==  inputTokens              /1e6 * inputCostPerMTok
           + cacheCreationInputTokens /1e6 * inputCostPerMTok * cacheWriteMultiplier
 ```
 
-Append-only means it is crash-safe, trivially `tail -f`-able, and mergeable
-across machines — no schema migrations, no lock contention. (Older lines without
-provenance fields still parse; the fields are optional.)
+Append-only means it is crash-safe, trivially `tail -f`-able, and mergeable across machines — no schema migrations, no lock contention. (Older lines without provenance fields still parse; the fields are optional.)
 
 ### Aggregation rollups
 
-`summarize()` (or `ledger.summarize()`) folds the ledger into totals plus
-`byModel` and `byProvider` buckets. Each bucket carries its **cache read and
-cache write token totals separately**, so you can see *why* a model is cheap or
-expensive, not just that it is — and `byProvider` now spans all three vendors.
+`summarize()` (or `ledger.summarize()`) folds the ledger into totals plus `byModel` and `byProvider` buckets. Each bucket carries its **cache read and cache write token totals separately**, so you can see *why* a model is cheap or expensive, not just that it is — and `byProvider` now spans all three vendors.
 
 ```ts
 const sum = await ledger.summarize();
@@ -263,9 +244,9 @@ sum.byProvider['ollama'];       // costUsd: 0
 sum.byModel['claude-opus-4-8'];
 ```
 
----
+<a name="cli"></a>
 
-## CLI
+## 🖥️ CLI
 
 A tiny, dependency-free entry point over the same library:
 
@@ -291,32 +272,23 @@ Usage summary  (ledger: ~/.structure/usage.log)
     ollama             1 calls   $0.0000   cache_read=0
 ```
 
----
+## 📊 Numbers
 
-## Numbers
+> [!NOTE]
+> Real fleet numbers are not committed — they live on the owner's machines. The table below is a placeholder; **populate it from your own `~/.structure/usage.log` via `llm-gateway usage`** (or `--json` piped into your own reducer).
 
-Real fleet numbers are not committed — they live on the owner's machines. The
-table below is a placeholder; **populate it from your own `~/.structure/usage.log`
-via `llm-gateway usage`** (or `--json` piped into your own reducer).
+| Workload | Calls | Median ms | p99 ms | Cache-read % | $/1k calls |
+| :--- | ---: | ---: | ---: | ---: | ---: |
+| _code-review_ | — | — | — | — | — |
+| _doc-summarize_ | — | — | — | — | — |
+| _agent-loop_ | — | — | — | — | — |
+| _embedding (local)_ | — | — | — | — | — |
 
-| workload            | calls | median ms | p99 ms | cache-read % | $/1k calls |
-| ------------------- | ----: | --------: | -----: | -----------: | ---------: |
-| _code-review_       |     — |         — |      — |            — |          — |
-| _doc-summarize_     |     — |         — |      — |            — |          — |
-| _agent-loop_        |     — |         — |      — |            — |          — |
-| _embedding (local)_ |     — |         — |      — |            — |          — |
+<a name="fleet"></a>
 
-> Real numbers live on the owner's fleet, not in this repo.
+## 🛰️ Fleet Routing (optional)
 
----
-
-## Fleet routing (optional)
-
-`OllamaFleet` routes inference across a set of local Ollama nodes by task type
-(reasoning / coding / vision / embedding / fast / general), model availability,
-and per-node GPU/RAM capability, with a 30-second health cache. The default node
-list is a **demo topology** (`node-a` / `node-b` / `node-c` on `localhost` and
-`*.local`) — swap in your own `FleetNode[]` via the constructor.
+`OllamaFleet` routes inference across a set of local Ollama nodes by task type (reasoning / coding / vision / embedding / fast / general), model availability, and per-node GPU/RAM capability, with a 30-second health cache. The default node list is a **demo topology** (`node-a` / `node-b` / `node-c` on `localhost` and `*.local`) — swap in your own `FleetNode[]` via the constructor.
 
 ```ts
 import { OllamaFleet } from 'llm-gateway';
@@ -328,9 +300,13 @@ const route = await fleet.route('reasoning');
 console.log(await fleet.status()); // live health + routing table
 ```
 
----
+<a name="api"></a>
 
-## API
+## 🔌 API
+
+<details open>
+<summary><b>Full export surface</b></summary>
+<br>
 
 ```ts
 import {
@@ -360,9 +336,9 @@ import {
 } from 'llm-gateway';
 ```
 
----
+</details>
 
-## Development
+## 🛠️ Development
 
 ```bash
 npm ci
@@ -371,6 +347,6 @@ npm test            # jest
 npm run build       # emit dist/
 ```
 
-## License
+## 📄 License
 
 MIT — see [LICENSE](./LICENSE).
